@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Auto-Typer
+Comment=Type clipboard with Ctrl+Shift+F12 — run install.sh first
+Exec=INSTALL_DIR/launch-silent.sh
+Icon=accessories-character-map
+Terminal=false
+X-GNOME-Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=autotyper;typing;clipboard;hotkey;
