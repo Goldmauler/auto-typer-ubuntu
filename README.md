@@ -13,7 +13,7 @@ Auto-types clipboard contents character-by-character using a global hotkey. Buil
 ## Quick Start
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Goldmauler/auto-typer-ubuntu.git
 cd auto-typer
 chmod +x *.sh
 ./install.sh
