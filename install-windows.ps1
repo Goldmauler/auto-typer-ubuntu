@@ -37,8 +37,8 @@ if (-not (Test-Path "config.txt")) {
         "# Examples: ctrl+shift+f12, ctrl+alt+t, ctrl+shift+v"
         "hotkey=ctrl+shift+f12"
         "reset_hotkey=ctrl+shift+f11"
-        "speed=12"
-        "human_delay=true"
+        "speed=40"
+        "human_delay=false"
         "indent_mode=editor"
     ) -join "`n"
     Set-Content -Path "config.txt" -Value $configText -Encoding UTF8

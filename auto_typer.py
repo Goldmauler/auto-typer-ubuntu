@@ -180,8 +180,8 @@ def load_config() -> dict[str, str]:
     defaults = {
         "hotkey": "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t",
         "reset_hotkey": "ctrl+shift+f11" if IS_WINDOWS else "ctrl+shift+f11",
-        "speed": "12",
-        "human_delay": "true",
+        "speed": "40",
+        "human_delay": "false",
         "indent_mode": "editor" if IS_WINDOWS else "literal",
     }
     if not CONFIG_FILE.is_file():
@@ -365,7 +365,7 @@ def resolve_typing_job(
 class AutoTyper:
     def __init__(
         self,
-        chars_per_second: float = 12.0,
+        chars_per_second: float = 40.0,
         human_delay: bool = True,
         indent_mode: str = "editor",
     ) -> None:
@@ -720,8 +720,8 @@ def main() -> None:
     config = load_config()
 
     parser = argparse.ArgumentParser(description="Auto-Typer (Windows + Ubuntu)")
-    parser.add_argument("--speed", type=float, default=float(config.get("speed", "12")),
-                        help="Average chars per second (default: 12)")
+    parser.add_argument("--speed", type=float, default=float(config.get("speed", "40")),
+                        help="Average chars per second (default: 40)")
     parser.add_argument(
         "--indent-mode",
         type=str,
