@@ -3,6 +3,8 @@ hotkey=ctrl+shift+f12
 reset_hotkey=ctrl+shift+f11
 speed=40
 human_delay=false
-# editor = VS Code/Cursor (fixes indent on resume)
-# literal = Notepad (types every space/tab)
-indent_mode=editor
+
+# INDENT MODE - pick ONE:
+# literal  = Notepad, WordPad, basic text editors (types every space/tab exactly)
+# editor   = VS Code, Cursor ONLY (clears IDE auto-indent)
+indent_mode=literal

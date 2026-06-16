@@ -39,7 +39,7 @@ if (-not (Test-Path "config.txt")) {
         "reset_hotkey=ctrl+shift+f11"
         "speed=40"
         "human_delay=false"
-        "indent_mode=editor"
+        "indent_mode=literal"
     ) -join "`n"
     Set-Content -Path "config.txt" -Value $configText -Encoding UTF8
     Write-Host "  Created config.txt (default hotkey: Ctrl+Shift+F12)"

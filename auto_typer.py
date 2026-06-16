@@ -182,7 +182,7 @@ def load_config() -> dict[str, str]:
         "reset_hotkey": "ctrl+shift+f11" if IS_WINDOWS else "ctrl+shift+f11",
         "speed": "40",
         "human_delay": "false",
-        "indent_mode": "editor" if IS_WINDOWS else "literal",
+        "indent_mode": "literal",
     }
     if not CONFIG_FILE.is_file():
         return defaults
@@ -217,6 +217,16 @@ def save_config(
 # ─── Indentation (line-based, exact) ─────────────────────────────────────────
 
 TAB_WIDTH = 4
+
+
+def normalize_indent_mode(mode: str) -> str:
+    """literal = Notepad/text editors | editor = VS Code/Cursor only."""
+    value = (mode or "literal").strip().lower()
+    if value in {"literal", "text", "text_editor", "notepad", "basic"}:
+        return "literal"
+    if value in {"editor", "ide", "vscode", "cursor"}:
+        return "editor"
+    return "literal"
 
 
 def measure_indent(line: str, tab_width: int = TAB_WIDTH) -> int:
@@ -380,11 +390,11 @@ class AutoTyper:
         self,
         chars_per_second: float = 40.0,
         human_delay: bool = True,
-        indent_mode: str = "editor",
+        indent_mode: str = "literal",
     ) -> None:
         self.chars_per_second = chars_per_second
         self.human_delay = human_delay
-        self.indent_mode = indent_mode if indent_mode in {"editor", "literal"} else "editor"
+        self.indent_mode = normalize_indent_mode(indent_mode)
         self._typing = False
         self._stop_after_line = False
         self._reset_requested = False
@@ -594,7 +604,8 @@ class AutoTyper:
     def _prepare_new_line_xdotool(self) -> bool:
         if not self._run_xdotool("key", "Return"):
             return False
-        if self._interruptible_sleep(0.15):
+        pause = 0.06 if self.indent_mode == "literal" else 0.15
+        if self._interruptible_sleep(pause):
             return False
         return self._clear_editor_line_xdotool()
 
@@ -691,7 +702,8 @@ class AutoTyper:
 
         controller.press(Key.enter)
         controller.release(Key.enter)
-        if self._interruptible_sleep(0.15):
+        pause = 0.06 if self.indent_mode == "literal" else 0.15
+        if self._interruptible_sleep(pause):
             return False
         return self._clear_editor_line_pynput(controller)
 
@@ -831,8 +843,8 @@ def main() -> None:
         "--indent-mode",
         type=str,
         choices=["editor", "literal"],
-        default=config.get("indent_mode", "editor" if IS_WINDOWS else "literal"),
-        help="editor=IDE auto-indent (VS Code/Cursor), literal=type all spaces (Notepad)",
+        default=config.get("indent_mode", "literal"),
+        help="literal=Notepad/text editor (exact spaces), editor=VS Code/Cursor only",
     )
     parser.add_argument(
         "--human-delay",
@@ -906,7 +918,8 @@ def main() -> None:
     print(f"  ║  Reset      : {reset_display:<33s} ║")
     speed_display = typer._speed_label()
     print(f"  ║  Speed      : {speed_display:<33s} ║")
-    print(f"  ║  Indent     : {args.indent_mode:<33s} ║")
+    indent_label = "literal (text editor)" if typer.indent_mode == "literal" else "editor (VS Code)"
+    print(f"  ║  Indent     : {indent_label:<33s} ║")
     print(f"  ║  Clipboard  : {clipboard_name:<33s} ║")
     print(f"  ║  Typing     : {typing_backend:<33s} ║")
     if not IS_WINDOWS:
