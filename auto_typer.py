@@ -179,11 +179,8 @@ def parse_bool_config(value: str, default: bool = True) -> bool:
 def load_config() -> dict[str, str]:
     defaults = {
         "hotkey": "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t",
-        "reset_hotkey": "ctrl+shift+f11" if IS_WINDOWS else "ctrl+shift+f11",
-        "speed": "30",
-        "human_delay": "false",
-        "indent_mode": "literal",
-        "type_method": "paste_lines",
+        "speed": "8",
+        "human_delay": "true",
     }
     if not CONFIG_FILE.is_file():
         return defaults
@@ -199,99 +196,14 @@ def load_config() -> dict[str, str]:
     return config
 
 
-def save_config(
-    hotkey: str,
-    speed: float,
-    human_delay: bool = True,
-    indent_mode: str = "editor",
-) -> None:
+def save_config(hotkey: str, speed: float, human_delay: bool = True) -> None:
     CONFIG_FILE.write_text(
         f"# Auto-Typer config — edit hotkey and speed here\n"
         f"hotkey={hotkey}\n"
         f"speed={speed}\n"
-        f"human_delay={str(human_delay).lower()}\n"
-        f"indent_mode={indent_mode}\n",
+        f"human_delay={str(human_delay).lower()}\n",
         encoding="utf-8",
     )
-
-
-# ─── Indentation (line-based, exact) ─────────────────────────────────────────
-
-TAB_WIDTH = 4
-
-
-def normalize_indent_mode(mode: str) -> str:
-    """literal = Notepad/text editors | editor = VS Code/Cursor only."""
-    value = (mode or "literal").strip().lower()
-    if value in {"literal", "text", "text_editor", "notepad", "basic"}:
-        return "literal"
-    if value in {"editor", "ide", "vscode", "cursor"}:
-        return "editor"
-    return "literal"
-
-
-def normalize_type_method(method: str) -> str:
-    """paste_lines = exact indent via Ctrl+V per line | keys = char-by-char."""
-    value = (method or "paste_lines").strip().lower()
-    if value in {"paste_lines", "paste", "lines", "line_paste"}:
-        return "paste_lines"
-    return "keys"
-
-
-def measure_indent(line: str, tab_width: int = TAB_WIDTH) -> int:
-    width = 0
-    for char in line:
-        if char == " ":
-            width += 1
-        elif char == "\t":
-            width += tab_width
-        else:
-            break
-    return width
-
-
-def update_virtual_indent(virtual_indent: int, line: str, tab_width: int = TAB_WIDTH) -> int:
-    """Track block indent; empty lines keep level; colon lines open a deeper block."""
-    if not line.strip():
-        return virtual_indent
-
-    current = measure_indent(line, tab_width)
-    stripped = line.rstrip()
-    if stripped.endswith((":", "{", "[", "(")):
-        return current + tab_width
-    return current
-
-
-def virtual_indent_at_line(
-    offsets: list[tuple[str, int, int]],
-    line_index: int,
-    tab_width: int = TAB_WIDTH,
-) -> int:
-    virtual_indent = 0
-    for index in range(line_index):
-        virtual_indent = update_virtual_indent(virtual_indent, offsets[index][0], tab_width)
-    return virtual_indent
-
-
-def build_line_offsets(text: str) -> list[tuple[str, int, int]]:
-    """Return (line_text, start_pos, end_pos) where end_pos is after the newline."""
-    lines = text.split("\n")
-    offsets: list[tuple[str, int, int]] = []
-    pos = 0
-    for index, line in enumerate(lines):
-        start = pos
-        pos += len(line)
-        if index < len(lines) - 1:
-            pos += 1
-        offsets.append((line, start, pos))
-    return offsets
-
-
-def find_line_index(offsets: list[tuple[str, int, int]], position: int) -> int:
-    for index, (_, start, end) in enumerate(offsets):
-        if start <= position < end:
-            return index
-    return max(0, len(offsets) - 1)
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────────────
@@ -304,25 +216,8 @@ def text_fingerprint(text: str) -> str:
     return hashlib.sha256(normalize_text(text).encode("utf-8")).hexdigest()[:16]
 
 
-def format_checkpoint_context(text: str, position: int) -> dict[str, str | int]:
-    typed = text[:position]
-    line = typed.count("\n") + 1
-    line_start = typed.rfind("\n") + 1
-    column = position - line_start + 1
-    next_chars = text[position : position + 40].replace("\n", "\\n")
-    last_typed = typed[max(0, len(typed) - 50) :].replace("\n", "\\n")
-    return {
-        "line": line,
-        "column": column,
-        "last_typed": last_typed,
-        "next_chars": next_chars,
-    }
-
-
-def save_checkpoint(text: str, position: int, indent_mode: str = "editor") -> None:
+def save_checkpoint(text: str, position: int) -> None:
     normalized = normalize_text(text)
-    position = max(0, min(position, len(normalized)))
-    context = format_checkpoint_context(normalized, position)
     CHECKPOINT_FILE.write_text(
         json.dumps(
             {
@@ -330,10 +225,6 @@ def save_checkpoint(text: str, position: int, indent_mode: str = "editor") -> No
                 "position": position,
                 "total": len(normalized),
                 "fingerprint": text_fingerprint(normalized),
-                "line": context["line"],
-                "column": context["column"],
-                "last_typed": context["last_typed"],
-                "next_chars": context["next_chars"],
             },
             ensure_ascii=False,
         ),
@@ -359,11 +250,8 @@ def clear_checkpoint() -> None:
     CHECKPOINT_FILE.unlink(missing_ok=True)
 
 
-def resolve_typing_job(
-    clipboard_text: str,
-    indent_mode: str = "editor",
-) -> tuple[str, int, bool, dict | None]:
-    """Return (text, start_position, is_resume, checkpoint_meta)."""
+def resolve_typing_job(clipboard_text: str) -> tuple[str, int, bool]:
+    """Return (text, start_position, is_resume)."""
     checkpoint = load_checkpoint()
     clipboard_text = normalize_text(clipboard_text)
 
@@ -376,40 +264,30 @@ def resolve_typing_job(
         )
 
         if same_text or (not clipboard_text and saved_pos < len(saved_text)):
-            return saved_text, saved_pos, True, checkpoint
+            return saved_text, saved_pos, True
 
         if clipboard_text and not same_text:
             clear_checkpoint()
-            return clipboard_text, 0, False, None
+            return clipboard_text, 0, False
 
         if saved_pos < len(saved_text):
-            return saved_text, saved_pos, True, checkpoint
+            return saved_text, saved_pos, True
 
     if not clipboard_text:
-        return "", 0, False, None
+        return "", 0, False
 
     clear_checkpoint()
-    return clipboard_text, 0, False, None
+    return clipboard_text, 0, False
 
 
 # ─── Typer ───────────────────────────────────────────────────────────────────
 
 class AutoTyper:
-    def __init__(
-        self,
-        chars_per_second: float = 30.0,
-        human_delay: bool = True,
-        indent_mode: str = "literal",
-        type_method: str = "paste_lines",
-    ) -> None:
+    def __init__(self, chars_per_second: float = 8.0, human_delay: bool = True) -> None:
         self.chars_per_second = chars_per_second
         self.human_delay = human_delay
-        self.indent_mode = normalize_indent_mode(indent_mode)
-        self.type_method = normalize_type_method(type_method)
         self._typing = False
-        self._stop_after_line = False
-        self._reset_requested = False
-        self._saved_clipboard: str | None = None
+        self._stop_requested = False
         self._use_xdotool = (not IS_WINDOWS) and shutil.which("xdotool") is not None
 
     @property
@@ -445,84 +323,31 @@ class AutoTyper:
 
         return max(0.03, delay)
 
-    def _interruptible_sleep(self, seconds: float) -> bool:
-        """Sleep in small slices; return True only if reset was requested."""
-        if seconds <= 0:
-            return self._reset_requested
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if self._reset_requested:
-                return True
-            time.sleep(min(0.015, end - time.monotonic()))
-        return self._reset_requested
-
-    def _line_delay(self, line: str) -> float:
-        if not line:
-            return 0.08
-        return max(0.08, len(line) / max(self.chars_per_second, 1.0))
-
     def _speed_label(self) -> str:
-        if self.type_method == "paste_lines":
-            return f"~{self.chars_per_second:.0f} cps (paste lines)"
         if self.human_delay:
             return f"~{self.chars_per_second:.0f} cps (normal)"
         return f"{self.chars_per_second:.0f} cps (steady)"
 
-    def _save_user_clipboard(self) -> None:
-        if IS_WINDOWS:
-            try:
-                self._saved_clipboard = _get_clipboard_windows()
-            except Exception:
-                self._saved_clipboard = None
-
-    def _restore_user_clipboard(self) -> None:
-        if self._saved_clipboard is not None and IS_WINDOWS:
-            try:
-                _set_clipboard_windows(self._saved_clipboard)
-            except Exception:
-                pass
-        self._saved_clipboard = None
-
-    def request_stop_after_line(self) -> None:
+    def type_clipboard(self) -> None:
         if self._typing:
-            print("  ⏳ Finishing current line, then stopping …")
-            self._stop_after_line = True
+            print("  ⏳ Stopping — checkpoint will be saved.")
+            self._stop_requested = True
             return
 
-        self.type_clipboard()
-
-    def reset_typing(self) -> None:
-        clear_checkpoint()
-        self._stop_after_line = False
-        if self._typing:
-            print("  🔄 Reset — stopping now. Next F12 starts from the beginning.")
-            self._reset_requested = True
-        else:
-            print("  🔄 Reset — checkpoint cleared. F12 starts from the beginning.")
-
-    def type_clipboard(self) -> None:
         clipboard_text = get_clipboard_text()
-        text, start_pos, is_resume, checkpoint_meta = resolve_typing_job(
-            clipboard_text,
-            self.indent_mode,
-        )
+        text, start_pos, is_resume = resolve_typing_job(clipboard_text)
 
         if not text:
             print("  📋 Clipboard is empty — copy text with Ctrl+C first (or use paste.txt).")
             return
 
         if is_resume:
-            ctx = format_checkpoint_context(text, start_pos)
             print(
-                f"  ▶  Resuming at line {ctx['line']} col {ctx['column']} "
-                f"({len(text) - start_pos} chars left)"
+                f"  ▶  Resuming from char {start_pos}/{len(text)} "
+                f"({len(text) - start_pos} remaining) …"
             )
-            print(f"  👉 Cursor at start of line {ctx['line']}. Next: {ctx['next_chars']!r}")
-            if checkpoint_meta and checkpoint_meta.get("last_typed"):
-                print(f"  ↩  Previous line ended: ...{checkpoint_meta['last_typed']!r}")
         else:
             clear_checkpoint()
-            print(f"  ▶  Starting from beginning ({len(text)} chars) …")
 
         thread = threading.Thread(
             target=self._type_text,
@@ -548,21 +373,12 @@ class AutoTyper:
 
     def _type_text(self, text: str, start_pos: int = 0) -> None:
         self._typing = True
-        self._stop_after_line = False
-        self._reset_requested = False
+        self._stop_requested = False
 
         text = normalize_text(text)
         total = len(text)
         remaining = total - start_pos
-
-        if self.type_method == "paste_lines" and IS_WINDOWS:
-            backend = "paste-lines"
-        elif self._use_xdotool:
-            backend = "xdotool"
-        else:
-            backend = "pynput"
-
-        self._save_user_clipboard()
+        backend = "xdotool" if self._use_xdotool else "pynput"
 
         speed_label = self._speed_label()
         if start_pos == 0:
@@ -570,218 +386,68 @@ class AutoTyper:
         else:
             print(f"\n  ▶  Continuing {remaining} chars at {speed_label} via {backend} …")
 
-        if start_pos > 0:
-            ctx = format_checkpoint_context(text, start_pos)
-            print(
-                f"  ⏳ Resuming in 0.5s at line {ctx['line']} — "
-                f"leave cursor at end of last typed line …"
-            )
-            if self._interruptible_sleep(0.5):
-                self._typing = False
-                self._reset_requested = False
-                return
+        time.sleep(0.4)
+
+        if self._use_xdotool:
+            end_pos = self._type_with_xdotool(text, start_pos)
         else:
-            if self._interruptible_sleep(0.4):
-                self._typing = False
-                self._reset_requested = False
-                return
+            end_pos = self._type_with_pynput(text, start_pos)
 
-        try:
-            if self.type_method == "paste_lines" and IS_WINDOWS:
-                end_pos, stopped = self._type_with_paste_lines(text, start_pos)
-            elif self._use_xdotool:
-                end_pos, stopped = self._type_with_xdotool(text, start_pos)
-            else:
-                end_pos, stopped = self._type_with_pynput(text, start_pos)
+        if self._stop_requested:
+            save_checkpoint(text, end_pos)
+            print(
+                f"\n  ⏹  Stopped at char {end_pos}/{total}. "
+                f"Press hotkey again to resume."
+            )
+        else:
+            clear_checkpoint()
+            print(f"  ✅ Done — typed {total} characters.")
 
-            if self._reset_requested:
-                clear_checkpoint()
-                print("\n  🔄 Typing aborted. Press F12 to start from the beginning.")
-            elif stopped:
-                stop_pos = end_pos
-                save_checkpoint(text, stop_pos, self.indent_mode)
-                ctx = format_checkpoint_context(text, stop_pos)
-                print(
-                    f"\n  ⏹  Stopped at line {ctx['line']} col {ctx['column']} "
-                    f"({stop_pos}/{total})"
-                )
-                print(f"  💾 Checkpoint saved. Next line: {ctx['next_chars']!r}")
-                print("  👉 Cursor on the next empty line. Press F12 to resume.")
-            else:
-                clear_checkpoint()
-                print(f"  ✅ Done — typed {total} characters.")
-        finally:
-            self._restore_user_clipboard()
-            self._typing = False
-            self._stop_after_line = False
-            self._reset_requested = False
+        self._typing = False
+        self._stop_requested = False
 
-    def _press_enter_pynput(self, controller) -> None:
-        from pynput.keyboard import Key
+    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> int:
+        for index in range(start_pos, len(text)):
+            if self._stop_requested:
+                return index
 
-        controller.press(Key.enter)
-        controller.release(Key.enter)
+            char = text[index]
+            next_char = text[index + 1] if index + 1 < len(text) else None
 
-    def _paste_line_pynput(self, controller, line: str) -> bool:
-        from pynput.keyboard import Key
-
-        if not line:
-            return True
-        if not _set_clipboard_windows(line):
-            print("  ⚠  Could not set clipboard for line paste.")
-            return False
-        if self._interruptible_sleep(0.05):
-            return False
-        with controller.pressed(Key.ctrl):
-            controller.press("v")
-            controller.release("v")
-        if self._interruptible_sleep(0.05):
-            return False
-        return True
-
-    def _type_with_paste_lines(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
-        """Paste one line at a time — perfect indentation in any text editor."""
-        from pynput.keyboard import Controller
-
-        controller = Controller()
-        offsets = build_line_offsets(text)
-        if not offsets:
-            return 0, False
-
-        line_index = find_line_index(offsets, start_pos)
-        col_offset = start_pos - offsets[line_index][1]
-
-        for index in range(line_index, len(offsets)):
-            line, line_start, line_end = offsets[index]
-
-            if self._reset_requested:
-                return line_start, False
-
-            content = line[col_offset:] if index == line_index and col_offset > 0 else line
-            col_offset = 0
-
-            if index > line_index:
-                self._press_enter_pynput(controller)
-                if self._interruptible_sleep(0.08):
-                    return line_start, False
-                if self._stop_after_line:
-                    return line_start, True
-
-            if not self._paste_line_pynput(controller, content):
-                return line_start, True
-
-            if self._interruptible_sleep(self._line_delay(content)):
-                return line_end, False
-
-            if self._stop_after_line:
-                if index < len(offsets) - 1:
-                    self._press_enter_pynput(controller)
-                    if self._interruptible_sleep(0.08):
-                        return line_end, False
-                    return offsets[index + 1][1], True
-                return line_end, False
-
-        return len(text), False
-
-    def _type_string_xdotool(self, content: str, start_index: int, full_text: str) -> tuple[int, bool]:
-        index = start_index
-        for offset, char in enumerate(content):
-            if self._reset_requested:
-                return index, False
-
-            next_char = content[offset + 1] if offset + 1 < len(content) else None
-            if char == "\t":
+            if char == "\n":
+                if not self._run_xdotool("key", "Return"):
+                    print("  ⚠  xdotool failed — is DISPLAY set? Try: export DISPLAY=:0")
+                    self._stop_requested = True
+                    return index
+            elif char == "\t":
                 if not self._run_xdotool("key", "Tab"):
-                    return index, True
+                    self._stop_requested = True
+                    return index
             else:
                 if not self._run_xdotool("type", "--delay", "0", "--", char):
-                    return index, True
+                    self._stop_requested = True
+                    return index
 
-            index += 1
-            if self._interruptible_sleep(self._delay_after_char(char, next_char)):
-                return index, False
+            time.sleep(self._delay_after_char(char, next_char))
 
-        return index, False
+        return len(text)
 
-    def _clear_editor_line_xdotool(self) -> bool:
-        if self.indent_mode != "editor":
-            return True
-        if not self._run_xdotool("key", "shift+Home"):
-            return False
-        if not self._run_xdotool("key", "Delete"):
-            return False
-        if self._interruptible_sleep(0.04):
-            return False
-        return True
+    def _type_with_pynput(self, text: str, start_pos: int = 0) -> int:
+        from pynput.keyboard import Controller, Key
 
-    def _prepare_new_line_xdotool(self) -> bool:
-        if not self._run_xdotool("key", "Return"):
-            return False
-        pause = 0.06 if self.indent_mode == "literal" else 0.15
-        if self._interruptible_sleep(pause):
-            return False
-        return self._clear_editor_line_xdotool()
+        controller = Controller()
 
-    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
-        offsets = build_line_offsets(text)
-        if not offsets:
-            return 0, False
+        for index in range(start_pos, len(text)):
+            if self._stop_requested:
+                return index
 
-        line_index = find_line_index(offsets, start_pos)
-        col_offset = start_pos - offsets[line_index][1]
-        virtual_indent = virtual_indent_at_line(offsets, line_index)
+            char = text[index]
+            next_char = text[index + 1] if index + 1 < len(text) else None
 
-        for index in range(line_index, len(offsets)):
-            line, line_start, line_end = offsets[index]
-
-            if self._reset_requested:
-                return line_start if col_offset == 0 else start_pos, False
-
-            if index == line_index and col_offset > 0:
-                typed_end, failed = self._type_string_xdotool(
-                    line[col_offset:], line_start + col_offset, text
-                )
-                if failed or self._reset_requested:
-                    return typed_end, False
-                virtual_indent = update_virtual_indent(virtual_indent, line)
-                if self._stop_after_line:
-                    return line_end, True
-                col_offset = 0
-                continue
-
-            if index > line_index:
-                if not self._prepare_new_line_xdotool():
-                    return line_start, True
-                if self._reset_requested:
-                    return line_start, False
-                if self._stop_after_line:
-                    return line_start, True
-
-            typed_end, failed = self._type_string_xdotool(line, line_start, text)
-            if failed or self._reset_requested:
-                return typed_end, False
-
-            virtual_indent = update_virtual_indent(virtual_indent, line)
-
-            if self._stop_after_line:
-                if index < len(offsets) - 1:
-                    if not self._prepare_new_line_xdotool():
-                        return line_end, True
-                    return offsets[index + 1][1], True
-                return line_end, False
-
-        return len(text), False
-
-    def _type_string_pynput(self, controller, content: str, start_index: int) -> tuple[int, bool]:
-        from pynput.keyboard import Key
-
-        index = start_index
-        for offset, char in enumerate(content):
-            if self._reset_requested:
-                return index, False
-
-            next_char = content[offset + 1] if offset + 1 < len(content) else None
-            if char == "\t":
+            if char == "\n":
+                controller.press(Key.enter)
+                controller.release(Key.enter)
+            elif char == "\t":
                 controller.press(Key.tab)
                 controller.release(Key.tab)
             elif char == " ":
@@ -790,88 +456,9 @@ class AutoTyper:
             else:
                 controller.type(char)
 
-            index += 1
-            if self._interruptible_sleep(self._delay_after_char(char, next_char)):
-                return index, False
+            time.sleep(self._delay_after_char(char, next_char))
 
-        return index, False
-
-    def _clear_editor_line_pynput(self, controller) -> bool:
-        from pynput.keyboard import Key
-
-        if self.indent_mode != "editor":
-            return True
-        with controller.pressed(Key.shift):
-            controller.press(Key.home)
-            controller.release(Key.home)
-        controller.press(Key.delete)
-        controller.release(Key.delete)
-        if self._interruptible_sleep(0.04):
-            return False
-        return True
-
-    def _prepare_new_line_pynput(self, controller) -> bool:
-        from pynput.keyboard import Key
-
-        controller.press(Key.enter)
-        controller.release(Key.enter)
-        pause = 0.06 if self.indent_mode == "literal" else 0.15
-        if self._interruptible_sleep(pause):
-            return False
-        return self._clear_editor_line_pynput(controller)
-
-    def _type_with_pynput(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
-        from pynput.keyboard import Controller
-
-        controller = Controller()
-        offsets = build_line_offsets(text)
-        if not offsets:
-            return 0, False
-
-        line_index = find_line_index(offsets, start_pos)
-        col_offset = start_pos - offsets[line_index][1]
-        virtual_indent = virtual_indent_at_line(offsets, line_index)
-
-        for index in range(line_index, len(offsets)):
-            line, line_start, line_end = offsets[index]
-
-            if self._reset_requested:
-                return line_start if col_offset == 0 else start_pos, False
-
-            if index == line_index and col_offset > 0:
-                typed_end, failed = self._type_string_pynput(
-                    controller, line[col_offset:], line_start + col_offset
-                )
-                if failed or self._reset_requested:
-                    return typed_end, False
-                virtual_indent = update_virtual_indent(virtual_indent, line)
-                if self._stop_after_line:
-                    return line_end, True
-                col_offset = 0
-                continue
-
-            if index > line_index:
-                if not self._prepare_new_line_pynput(controller):
-                    return line_start, True
-                if self._reset_requested:
-                    return line_start, False
-                if self._stop_after_line:
-                    return line_start, True
-
-            typed_end, failed = self._type_string_pynput(controller, line, line_start)
-            if failed or self._reset_requested:
-                return typed_end, False
-
-            virtual_indent = update_virtual_indent(virtual_indent, line)
-
-            if self._stop_after_line:
-                if index < len(offsets) - 1:
-                    if not self._prepare_new_line_pynput(controller):
-                        return line_end, True
-                    return offsets[index + 1][1], True
-                return line_end, False
-
-        return len(text), False
+        return len(text)
 
 
 # ─── Hotkey ──────────────────────────────────────────────────────────────────
@@ -950,22 +537,8 @@ def main() -> None:
     config = load_config()
 
     parser = argparse.ArgumentParser(description="Auto-Typer (Windows + Ubuntu)")
-    parser.add_argument("--speed", type=float, default=float(config.get("speed", "40")),
-                        help="Average chars per second (default: 40)")
-    parser.add_argument(
-        "--indent-mode",
-        type=str,
-        choices=["editor", "literal"],
-        default=config.get("indent_mode", "literal"),
-        help="literal=Notepad/text editor (exact spaces), editor=VS Code/Cursor only",
-    )
-    parser.add_argument(
-        "--type-method",
-        type=str,
-        choices=["paste_lines", "keys"],
-        default=config.get("type_method", "paste_lines"),
-        help="paste_lines=exact indent (recommended), keys=char-by-char",
-    )
+    parser.add_argument("--speed", type=float, default=float(config.get("speed", "8")),
+                        help="Average chars per second (default: 8)")
     parser.add_argument(
         "--human-delay",
         action=argparse.BooleanOptionalAction,
@@ -976,13 +549,7 @@ def main() -> None:
         "--hotkey",
         type=str,
         default=config.get("hotkey", "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t"),
-        help='Start / resume / stop-after-line (default: "ctrl+shift+f12")',
-    )
-    parser.add_argument(
-        "--reset-hotkey",
-        type=str,
-        default=config.get("reset_hotkey", "ctrl+shift+f11"),
-        help='Reset to beginning (default: "ctrl+shift+f11")',
+        help='Hotkey combo (default: "ctrl+shift+f12" on Windows)',
     )
     parser.add_argument("--test", action="store_true", help="Run diagnostic self-test")
     parser.add_argument("--save-config", action="store_true",
@@ -990,11 +557,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.save_config:
-        save_config(args.hotkey, args.speed, args.human_delay, args.indent_mode)
+        save_config(args.hotkey, args.speed, args.human_delay)
         print(
             f"  💾 Saved config: hotkey={args.hotkey}, "
-            f"speed={args.speed}, human_delay={args.human_delay}, "
-            f"indent_mode={args.indent_mode}"
+            f"speed={args.speed}, human_delay={args.human_delay}"
         )
 
     if args.test:
@@ -1005,22 +571,12 @@ def main() -> None:
         os.environ["DISPLAY"] = ":0"
         print("  ℹ  DISPLAY was not set — using :0")
 
-    typer = AutoTyper(
-        chars_per_second=args.speed,
-        human_delay=args.human_delay,
-        indent_mode=args.indent_mode,
-        type_method=args.type_method,
-    )
+    typer = AutoTyper(chars_per_second=args.speed, human_delay=args.human_delay)
     hotkey_str = combo_to_global_hotkey(args.hotkey)
-    reset_hotkey_str = combo_to_global_hotkey(args.reset_hotkey)
 
-    hotkeys = {
-        hotkey_str: typer.request_stop_after_line,
-        reset_hotkey_str: typer.reset_typing,
-    }
+    hotkeys = {hotkey_str: typer.type_clipboard}
 
     hotkey_display = args.hotkey.upper().replace("+", " + ")
-    reset_display = args.reset_hotkey.upper().replace("+", " + ")
     platform_name = "Windows" if IS_WINDOWS else "Ubuntu"
 
     if IS_WINDOWS:
@@ -1029,37 +585,31 @@ def main() -> None:
         clipboard_tool = _read_clipboard_command()
         clipboard_name = clipboard_tool[0] if clipboard_tool else "not found"
 
-    if typer.type_method == "paste_lines" and IS_WINDOWS:
-        typing_backend = "paste-lines"
-    else:
-        typing_backend = "xdotool" if typer._use_xdotool else "pynput"
+    typing_backend = "xdotool" if typer._use_xdotool else "pynput"
 
     print()
     print("  ╔══════════════════════════════════════════════╗")
     print(f"  ║          🚀  AUTO-TYPER  ({platform_name:<10s})       ║")
     print("  ╠══════════════════════════════════════════════╣")
-    print(f"  ║  Start/Stop : {hotkey_display:<33s} ║")
-    print(f"  ║  Reset      : {reset_display:<33s} ║")
+    print(f"  ║  Hotkey    : {hotkey_display:<33s} ║")
     speed_display = typer._speed_label()
-    print(f"  ║  Speed      : {speed_display:<33s} ║")
-    method_label = "paste lines (exact)" if typer.type_method == "paste_lines" else "keys"
-    print(f"  ║  Method     : {method_label:<33s} ║")
-    print(f"  ║  Clipboard  : {clipboard_name:<33s} ║")
-    print(f"  ║  Typing     : {typing_backend:<33s} ║")
+    print(f"  ║  Speed     : {speed_display:<33s} ║")
+    print(f"  ║  Clipboard : {clipboard_name:<33s} ║")
+    print(f"  ║  Typing    : {typing_backend:<33s} ║")
     if not IS_WINDOWS:
-        print(f"  ║  DISPLAY    : {os.environ.get('DISPLAY', ''):<33s} ║")
+        print(f"  ║  DISPLAY   : {os.environ.get('DISPLAY', ''):<33s} ║")
     print("  ║                                              ║")
     print("  ║  1. Copy text with Ctrl+C                    ║")
     print("  ║  2. Click where you want to type             ║")
-    print(f"  ║  3. {hotkey_display} = start / resume          ║")
-    print(f"  ║  4. {hotkey_display} while typing = stop       ║")
-    print("  ║     after current line finishes              ║")
-    print(f"  ║  5. {reset_display} = reset to beginning      ║")
+    print(f"  ║  3. Press {hotkey_display:<34s} ║")
+    print("  ║  4. Press hotkey again to STOP + save spot    ║")
+    print("  ║  5. Press hotkey again to RESUME typing      ║")
+    print("  ║     (copy new text to start fresh)           ║")
     print("  ║                                              ║")
     print("  ║  Ctrl+C here to quit                         ║")
     print("  ╚══════════════════════════════════════════════╝")
     print()
-    print(f"  Listening for {hotkey_str} and {reset_hotkey_str} …")
+    print(f"  Listening for {hotkey_str} …")
     print()
 
     try:

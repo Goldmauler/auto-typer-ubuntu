@@ -52,11 +52,8 @@ if (-not (Test-Path "config.txt")) {
     $configText = @(
         "# Auto-Typer config"
         "hotkey=ctrl+shift+f12"
-        "reset_hotkey=ctrl+shift+f11"
-        "speed=30"
-        "human_delay=false"
-        "type_method=paste_lines"
-        "indent_mode=literal"
+        "speed=12"
+        "human_delay=true"
     ) -join "`n"
     Set-Content -Path "config.txt" -Value $configText -Encoding UTF8
     Write-Host "  Created config.txt"
