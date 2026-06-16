@@ -214,48 +214,51 @@ def save_config(
     )
 
 
-# ─── Indentation ─────────────────────────────────────────────────────────────
+# ─── Indentation (line-based, exact) ─────────────────────────────────────────
 
-def _line_start(text: str, pos: int) -> int:
-    return text.rfind("\n", 0, max(pos - 1, 0)) + 1
-
-
-def _line_indent_end(text: str, line_start: int) -> int:
-    pos = line_start
-    while pos < len(text) and text[pos] in " \t":
-        pos += 1
-    return pos
+TAB_WIDTH = 4
 
 
-def _is_in_line_indent(text: str, pos: int) -> bool:
-    if pos >= len(text):
-        return False
-    line_start = _line_start(text, pos)
-    return pos < _line_indent_end(text, line_start)
+def measure_indent(line: str, tab_width: int = TAB_WIDTH) -> int:
+    width = 0
+    for char in line:
+        if char == " ":
+            width += 1
+        elif char == "\t":
+            width += tab_width
+        else:
+            break
+    return width
 
 
-def align_resume_position(text: str, pos: int, indent_mode: str) -> int:
-    """Skip duplicate line-indent on resume (fixes IDE auto-indent + re-type)."""
-    if indent_mode != "editor" or pos >= len(text):
-        return pos
-
-    if pos == 0 and text[pos] in " \t":
-        return _line_indent_end(text, 0)
-
-    if pos > 0 and text[pos - 1] == "\n":
-        return _line_indent_end(text, pos)
-
-    if _is_in_line_indent(text, pos):
-        return _line_indent_end(text, _line_start(text, pos))
-
-    return pos
+def expected_editor_indent(prev_line: str, prev_indent: int, tab_width: int = TAB_WIDTH) -> int:
+    stripped = prev_line.rstrip()
+    if not stripped:
+        return prev_indent
+    if stripped.endswith((":", "{", "[", "(", "\\")):
+        return prev_indent + tab_width
+    return prev_indent
 
 
-def skip_line_indent(text: str, pos: int, indent_mode: str) -> int:
-    """After Enter, skip leading whitespace the editor already auto-indented."""
-    if indent_mode != "editor":
-        return pos
-    return _line_indent_end(text, pos)
+def build_line_offsets(text: str) -> list[tuple[str, int, int]]:
+    """Return (line_text, start_pos, end_pos) where end_pos is after the newline."""
+    lines = text.split("\n")
+    offsets: list[tuple[str, int, int]] = []
+    pos = 0
+    for index, line in enumerate(lines):
+        start = pos
+        pos += len(line)
+        if index < len(lines) - 1:
+            pos += 1
+        offsets.append((line, start, pos))
+    return offsets
+
+
+def find_line_index(offsets: list[tuple[str, int, int]], position: int) -> int:
+    for index, (_, start, end) in enumerate(offsets):
+        if start <= position < end:
+            return index
+    return max(0, len(offsets) - 1)
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────────────
@@ -285,13 +288,13 @@ def format_checkpoint_context(text: str, position: int) -> dict[str, str | int]:
 
 def save_checkpoint(text: str, position: int, indent_mode: str = "editor") -> None:
     normalized = normalize_text(text)
-    aligned = align_resume_position(normalized, position, indent_mode)
-    context = format_checkpoint_context(normalized, aligned)
+    position = max(0, min(position, len(normalized)))
+    context = format_checkpoint_context(normalized, position)
     CHECKPOINT_FILE.write_text(
         json.dumps(
             {
                 "text": normalized,
-                "position": aligned,
+                "position": position,
                 "total": len(normalized),
                 "fingerprint": text_fingerprint(normalized),
                 "line": context["line"],
@@ -333,11 +336,7 @@ def resolve_typing_job(
 
     if checkpoint:
         saved_text = checkpoint["text"]
-        saved_pos = align_resume_position(
-            saved_text,
-            int(checkpoint["position"]),
-            indent_mode,
-        )
+        saved_pos = int(checkpoint["position"])
         same_text = (
             clipboard_text
             and text_fingerprint(clipboard_text) == checkpoint.get("fingerprint")
@@ -420,9 +419,6 @@ class AutoTyper:
                 return True
             time.sleep(min(0.015, end - time.monotonic()))
         return self._reset_requested
-
-    def _checkpoint_stop_pos(self, text: str, index: int) -> int:
-        return align_resume_position(text, index, self.indent_mode)
 
     def _speed_label(self) -> str:
         if self.human_delay:
@@ -508,18 +504,11 @@ class AutoTyper:
         else:
             print(f"\n  ▶  Continuing {remaining} chars at {speed_label} via {backend} …")
 
-        aligned_pos = align_resume_position(text, start_pos, self.indent_mode)
-        if aligned_pos != start_pos:
-            print(
-                f"  ↪  Resume aligned {start_pos} → {aligned_pos} "
-                f"(skipped duplicate indent)"
-            )
-
         if start_pos > 0:
-            ctx = format_checkpoint_context(text, aligned_pos)
+            ctx = format_checkpoint_context(text, start_pos)
             print(
                 f"  ⏳ Resuming in 0.5s at line {ctx['line']} — "
-                f"cursor at start of that line …"
+                f"leave cursor at end of last typed line …"
             )
             if self._interruptible_sleep(0.5):
                 self._typing = False
@@ -532,15 +521,15 @@ class AutoTyper:
                 return
 
         if self._use_xdotool:
-            end_pos, stopped = self._type_with_xdotool(text, aligned_pos)
+            end_pos, stopped = self._type_with_xdotool(text, start_pos)
         else:
-            end_pos, stopped = self._type_with_pynput(text, aligned_pos)
+            end_pos, stopped = self._type_with_pynput(text, start_pos)
 
         if self._reset_requested:
             clear_checkpoint()
             print("\n  🔄 Typing aborted. Press F12 to start from the beginning.")
         elif stopped:
-            stop_pos = self._checkpoint_stop_pos(text, end_pos)
+            stop_pos = end_pos
             save_checkpoint(text, stop_pos, self.indent_mode)
             ctx = format_checkpoint_context(text, stop_pos)
             print(
@@ -548,7 +537,7 @@ class AutoTyper:
                 f"({stop_pos}/{total})"
             )
             print(f"  💾 Checkpoint saved. Next line: {ctx['next_chars']!r}")
-            print("  👉 Cursor is at start of this line. Press F12 to resume.")
+            print("  👉 Cursor on the next empty line. Press F12 to resume.")
         else:
             clear_checkpoint()
             print(f"  ✅ Done — typed {total} characters.")
@@ -557,45 +546,19 @@ class AutoTyper:
         self._stop_after_line = False
         self._reset_requested = False
 
-    def _handle_newline(self, text: str, index: int) -> tuple[int, bool]:
-        """Advance past newline + indent. Return (index, stop_now)."""
-        index += 1
-        if self.indent_mode == "editor":
-            if self._interruptible_sleep(0.10):
-                return self._checkpoint_stop_pos(text, index), True
-            index = skip_line_indent(text, index, self.indent_mode)
-        if self._stop_after_line:
-            return index, True
-        return index, False
-
-    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
-        index = start_pos
-        while index < len(text):
+    def _type_string_xdotool(self, content: str, start_index: int, full_text: str) -> tuple[int, bool]:
+        index = start_index
+        for offset, char in enumerate(content):
             if self._reset_requested:
                 return index, False
 
-            char = text[index]
-            next_char = text[index + 1] if index + 1 < len(text) else None
-
-            if char == "\n":
-                if not self._run_xdotool("key", "Return"):
-                    print("  ⚠  xdotool failed — is DISPLAY set? Try: export DISPLAY=:0")
-                    return self._checkpoint_stop_pos(text, index), True
-                index, stop_now = self._handle_newline(text, index)
-                if stop_now or self._reset_requested:
-                    return index, stop_now and not self._reset_requested
-                if self._interruptible_sleep(
-                    self._delay_after_char("\n", text[index] if index < len(text) else None)
-                ):
-                    return self._checkpoint_stop_pos(text, index), False
-                continue
-
+            next_char = content[offset + 1] if offset + 1 < len(content) else None
             if char == "\t":
                 if not self._run_xdotool("key", "Tab"):
-                    return self._checkpoint_stop_pos(text, index), True
+                    return index, True
             else:
                 if not self._run_xdotool("type", "--delay", "0", "--", char):
-                    return self._checkpoint_stop_pos(text, index), True
+                    return index, True
 
             index += 1
             if self._interruptible_sleep(self._delay_after_char(char, next_char)):
@@ -603,31 +566,77 @@ class AutoTyper:
 
         return index, False
 
-    def _type_with_pynput(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
-        from pynput.keyboard import Controller, Key
+    def _prepare_new_line_xdotool(self, prev_line: str) -> bool:
+        if not self._run_xdotool("key", "Return"):
+            return False
+        if self._interruptible_sleep(0.12):
+            return False
+        if self.indent_mode == "editor":
+            prev_indent = measure_indent(prev_line)
+            editor_indent = expected_editor_indent(prev_line, prev_indent)
+            for _ in range(editor_indent):
+                if self._reset_requested:
+                    return False
+                if not self._run_xdotool("key", "BackSpace"):
+                    return False
+            if self._interruptible_sleep(0.03):
+                return False
+        return True
 
-        controller = Controller()
-        index = start_pos
+    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
+        offsets = build_line_offsets(text)
+        if not offsets:
+            return 0, False
 
-        while index < len(text):
+        line_index = find_line_index(offsets, start_pos)
+        col_offset = start_pos - offsets[line_index][1]
+
+        for index in range(line_index, len(offsets)):
+            line, line_start, line_end = offsets[index]
+
+            if self._reset_requested:
+                return line_start if col_offset == 0 else start_pos, False
+
+            if index == line_index and col_offset > 0:
+                typed_end, failed = self._type_string_xdotool(
+                    line[col_offset:], line_start + col_offset, text
+                )
+                if failed or self._reset_requested:
+                    return typed_end, False
+                if self._stop_after_line:
+                    return line_end, True
+                col_offset = 0
+                continue
+
+            if index > line_index:
+                if not self._prepare_new_line_xdotool(offsets[index - 1][0]):
+                    return line_start, True
+                if self._reset_requested:
+                    return line_start, False
+                if self._stop_after_line:
+                    return line_start, True
+
+            typed_end, failed = self._type_string_xdotool(line, line_start, text)
+            if failed or self._reset_requested:
+                return typed_end, False
+            if self._stop_after_line:
+                if index < len(offsets) - 1:
+                    if not self._prepare_new_line_xdotool(line):
+                        return line_end, True
+                    return offsets[index + 1][1], True
+                return line_end, False
+
+        return len(text), False
+
+    def _type_string_pynput(self, controller, content: str, start_index: int) -> tuple[int, bool]:
+        from pynput.keyboard import Key
+
+        index = start_index
+        for offset, char in enumerate(content):
             if self._reset_requested:
                 return index, False
 
-            char = text[index]
-            next_char = text[index + 1] if index + 1 < len(text) else None
-
-            if char == "\n":
-                controller.press(Key.enter)
-                controller.release(Key.enter)
-                index, stop_now = self._handle_newline(text, index)
-                if stop_now or self._reset_requested:
-                    return index, stop_now and not self._reset_requested
-                if self._interruptible_sleep(
-                    self._delay_after_char("\n", text[index] if index < len(text) else None)
-                ):
-                    return self._checkpoint_stop_pos(text, index), False
-                continue
-
+            next_char = content[offset + 1] if offset + 1 < len(content) else None
             if char == "\t":
                 controller.press(Key.tab)
                 controller.release(Key.tab)
@@ -642,6 +651,73 @@ class AutoTyper:
                 return index, False
 
         return index, False
+
+    def _prepare_new_line_pynput(self, controller, prev_line: str) -> bool:
+        from pynput.keyboard import Key
+
+        controller.press(Key.enter)
+        controller.release(Key.enter)
+        if self._interruptible_sleep(0.12):
+            return False
+        if self.indent_mode == "editor":
+            prev_indent = measure_indent(prev_line)
+            editor_indent = expected_editor_indent(prev_line, prev_indent)
+            for _ in range(editor_indent):
+                if self._reset_requested:
+                    return False
+                controller.press(Key.backspace)
+                controller.release(Key.backspace)
+            if self._interruptible_sleep(0.03):
+                return False
+        return True
+
+    def _type_with_pynput(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
+        from pynput.keyboard import Controller
+
+        controller = Controller()
+        offsets = build_line_offsets(text)
+        if not offsets:
+            return 0, False
+
+        line_index = find_line_index(offsets, start_pos)
+        col_offset = start_pos - offsets[line_index][1]
+
+        for index in range(line_index, len(offsets)):
+            line, line_start, line_end = offsets[index]
+
+            if self._reset_requested:
+                return line_start if col_offset == 0 else start_pos, False
+
+            if index == line_index and col_offset > 0:
+                typed_end, failed = self._type_string_pynput(
+                    controller, line[col_offset:], line_start + col_offset
+                )
+                if failed or self._reset_requested:
+                    return typed_end, False
+                if self._stop_after_line:
+                    return line_end, True
+                col_offset = 0
+                continue
+
+            if index > line_index:
+                if not self._prepare_new_line_pynput(controller, offsets[index - 1][0]):
+                    return line_start, True
+                if self._reset_requested:
+                    return line_start, False
+                if self._stop_after_line:
+                    return line_start, True
+
+            typed_end, failed = self._type_string_pynput(controller, line, line_start)
+            if failed or self._reset_requested:
+                return typed_end, False
+            if self._stop_after_line:
+                if index < len(offsets) - 1:
+                    if not self._prepare_new_line_pynput(controller, line):
+                        return line_end, True
+                    return offsets[index + 1][1], True
+                return line_end, False
+
+        return len(text), False
 
 
 # ─── Hotkey ──────────────────────────────────────────────────────────────────
