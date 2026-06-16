@@ -267,15 +267,36 @@ def text_fingerprint(text: str) -> str:
     return hashlib.sha256(normalize_text(text).encode("utf-8")).hexdigest()[:16]
 
 
-def save_checkpoint(text: str, position: int) -> None:
+def format_checkpoint_context(text: str, position: int) -> dict[str, str | int]:
+    typed = text[:position]
+    line = typed.count("\n") + 1
+    line_start = typed.rfind("\n") + 1
+    column = position - line_start + 1
+    next_chars = text[position : position + 40].replace("\n", "\\n")
+    last_typed = typed[max(0, len(typed) - 50) :].replace("\n", "\\n")
+    return {
+        "line": line,
+        "column": column,
+        "last_typed": last_typed,
+        "next_chars": next_chars,
+    }
+
+
+def save_checkpoint(text: str, position: int, indent_mode: str = "editor") -> None:
     normalized = normalize_text(text)
+    aligned = align_resume_position(normalized, position, indent_mode)
+    context = format_checkpoint_context(normalized, aligned)
     CHECKPOINT_FILE.write_text(
         json.dumps(
             {
                 "text": normalized,
-                "position": position,
+                "position": aligned,
                 "total": len(normalized),
                 "fingerprint": text_fingerprint(normalized),
+                "line": context["line"],
+                "column": context["column"],
+                "last_typed": context["last_typed"],
+                "next_chars": context["next_chars"],
             },
             ensure_ascii=False,
         ),
@@ -301,34 +322,41 @@ def clear_checkpoint() -> None:
     CHECKPOINT_FILE.unlink(missing_ok=True)
 
 
-def resolve_typing_job(clipboard_text: str) -> tuple[str, int, bool]:
-    """Return (text, start_position, is_resume)."""
+def resolve_typing_job(
+    clipboard_text: str,
+    indent_mode: str = "editor",
+) -> tuple[str, int, bool, dict | None]:
+    """Return (text, start_position, is_resume, checkpoint_meta)."""
     checkpoint = load_checkpoint()
     clipboard_text = normalize_text(clipboard_text)
 
     if checkpoint:
         saved_text = checkpoint["text"]
-        saved_pos = int(checkpoint["position"])
+        saved_pos = align_resume_position(
+            saved_text,
+            int(checkpoint["position"]),
+            indent_mode,
+        )
         same_text = (
             clipboard_text
             and text_fingerprint(clipboard_text) == checkpoint.get("fingerprint")
         )
 
         if same_text or (not clipboard_text and saved_pos < len(saved_text)):
-            return saved_text, saved_pos, True
+            return saved_text, saved_pos, True, checkpoint
 
         if clipboard_text and not same_text:
             clear_checkpoint()
-            return clipboard_text, 0, False
+            return clipboard_text, 0, False, None
 
         if saved_pos < len(saved_text):
-            return saved_text, saved_pos, True
+            return saved_text, saved_pos, True, checkpoint
 
     if not clipboard_text:
-        return "", 0, False
+        return "", 0, False, None
 
     clear_checkpoint()
-    return clipboard_text, 0, False
+    return clipboard_text, 0, False, None
 
 
 # ─── Typer ───────────────────────────────────────────────────────────────────
@@ -380,6 +408,20 @@ class AutoTyper:
 
         return max(0.03, delay)
 
+    def _interruptible_sleep(self, seconds: float) -> bool:
+        """Sleep in small slices; return True if stop was requested."""
+        if seconds <= 0:
+            return self._stop_requested
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self._stop_requested:
+                return True
+            time.sleep(min(0.015, end - time.monotonic()))
+        return self._stop_requested
+
+    def _checkpoint_stop_pos(self, text: str, index: int) -> int:
+        return align_resume_position(text, index, self.indent_mode)
+
     def _speed_label(self) -> str:
         if self.human_delay:
             return f"~{self.chars_per_second:.0f} cps (normal)"
@@ -392,17 +434,24 @@ class AutoTyper:
             return
 
         clipboard_text = get_clipboard_text()
-        text, start_pos, is_resume = resolve_typing_job(clipboard_text)
+        text, start_pos, is_resume, checkpoint_meta = resolve_typing_job(
+            clipboard_text,
+            self.indent_mode,
+        )
 
         if not text:
             print("  📋 Clipboard is empty — copy text with Ctrl+C first (or use paste.txt).")
             return
 
         if is_resume:
+            ctx = format_checkpoint_context(text, start_pos)
             print(
-                f"  ▶  Resuming from char {start_pos}/{len(text)} "
-                f"({len(text) - start_pos} remaining) …"
+                f"  ▶  Resuming at line {ctx['line']} col {ctx['column']} "
+                f"({len(text) - start_pos} chars left)"
             )
+            print(f"  👉 Click at the END of typed text. Next: {ctx['next_chars']!r}")
+            if checkpoint_meta and checkpoint_meta.get("last_typed"):
+                print(f"  ↩  After: ...{checkpoint_meta['last_typed']!r}")
         else:
             clear_checkpoint()
 
@@ -450,7 +499,15 @@ class AutoTyper:
                 f"(skipped duplicate indent)"
             )
 
-        time.sleep(0.4)
+        if start_pos > 0:
+            print("  ⏳ Resuming in 0.6s — place cursor at end of typed text …")
+            if self._interruptible_sleep(0.6):
+                self._typing = False
+                return
+        else:
+            if self._interruptible_sleep(0.4):
+                self._typing = False
+                return
 
         if self._use_xdotool:
             end_pos = self._type_with_xdotool(text, aligned_pos)
@@ -458,11 +515,12 @@ class AutoTyper:
             end_pos = self._type_with_pynput(text, aligned_pos)
 
         if self._stop_requested:
-            save_checkpoint(text, end_pos)
-            print(
-                f"\n  ⏹  Stopped at char {end_pos}/{total}. "
-                f"Press hotkey again to resume."
-            )
+            stop_pos = self._checkpoint_stop_pos(text, end_pos)
+            save_checkpoint(text, stop_pos, self.indent_mode)
+            ctx = format_checkpoint_context(text, stop_pos)
+            print(f"\n  ⏹  Stopped at line {ctx['line']} col {ctx['column']} ({stop_pos}/{total})")
+            print(f"  💾 Checkpoint saved. Next will type: {ctx['next_chars']!r}")
+            print("  👉 Leave cursor where it is, then press hotkey to resume.")
         else:
             clear_checkpoint()
             print(f"  ✅ Done — typed {total} characters.")
@@ -470,11 +528,20 @@ class AutoTyper:
         self._typing = False
         self._stop_requested = False
 
+    def _handle_newline(self, text: str, index: int) -> int:
+        """Advance index past newline and any editor-handled indent. Returns new index."""
+        index += 1
+        if self.indent_mode == "editor":
+            if self._interruptible_sleep(0.10):
+                return self._checkpoint_stop_pos(text, index)
+            index = skip_line_indent(text, index, self.indent_mode)
+        return index
+
     def _type_with_xdotool(self, text: str, start_pos: int = 0) -> int:
         index = start_pos
         while index < len(text):
             if self._stop_requested:
-                return index
+                return self._checkpoint_stop_pos(text, index)
 
             char = text[index]
             next_char = text[index + 1] if index + 1 < len(text) else None
@@ -483,25 +550,28 @@ class AutoTyper:
                 if not self._run_xdotool("key", "Return"):
                     print("  ⚠  xdotool failed — is DISPLAY set? Try: export DISPLAY=:0")
                     self._stop_requested = True
+                    return self._checkpoint_stop_pos(text, index)
+                index = self._handle_newline(text, index)
+                if self._stop_requested:
                     return index
-                index += 1
-                if self.indent_mode == "editor":
-                    time.sleep(0.06)
-                    index = skip_line_indent(text, index, self.indent_mode)
-                time.sleep(self._delay_after_char("\n", text[index] if index < len(text) else None))
+                if self._interruptible_sleep(
+                    self._delay_after_char("\n", text[index] if index < len(text) else None)
+                ):
+                    return self._checkpoint_stop_pos(text, index)
                 continue
 
             if char == "\t":
                 if not self._run_xdotool("key", "Tab"):
                     self._stop_requested = True
-                    return index
+                    return self._checkpoint_stop_pos(text, index)
             else:
                 if not self._run_xdotool("type", "--delay", "0", "--", char):
                     self._stop_requested = True
-                    return index
+                    return self._checkpoint_stop_pos(text, index)
 
             index += 1
-            time.sleep(self._delay_after_char(char, next_char))
+            if self._interruptible_sleep(self._delay_after_char(char, next_char)):
+                return self._checkpoint_stop_pos(text, index)
 
         return index
 
@@ -513,7 +583,7 @@ class AutoTyper:
 
         while index < len(text):
             if self._stop_requested:
-                return index
+                return self._checkpoint_stop_pos(text, index)
 
             char = text[index]
             next_char = text[index + 1] if index + 1 < len(text) else None
@@ -521,11 +591,13 @@ class AutoTyper:
             if char == "\n":
                 controller.press(Key.enter)
                 controller.release(Key.enter)
-                index += 1
-                if self.indent_mode == "editor":
-                    time.sleep(0.06)
-                    index = skip_line_indent(text, index, self.indent_mode)
-                time.sleep(self._delay_after_char("\n", text[index] if index < len(text) else None))
+                index = self._handle_newline(text, index)
+                if self._stop_requested:
+                    return index
+                if self._interruptible_sleep(
+                    self._delay_after_char("\n", text[index] if index < len(text) else None)
+                ):
+                    return self._checkpoint_stop_pos(text, index)
                 continue
 
             if char == "\t":
@@ -538,7 +610,8 @@ class AutoTyper:
                 controller.type(char)
 
             index += 1
-            time.sleep(self._delay_after_char(char, next_char))
+            if self._interruptible_sleep(self._delay_after_char(char, next_char)):
+                return self._checkpoint_stop_pos(text, index)
 
         return index
 
