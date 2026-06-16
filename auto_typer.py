@@ -231,13 +231,22 @@ def measure_indent(line: str, tab_width: int = TAB_WIDTH) -> int:
     return width
 
 
-def expected_editor_indent(prev_line: str, prev_indent: int, tab_width: int = TAB_WIDTH) -> int:
-    stripped = prev_line.rstrip()
-    if not stripped:
-        return prev_indent
-    if stripped.endswith((":", "{", "[", "(", "\\")):
-        return prev_indent + tab_width
-    return prev_indent
+def update_virtual_indent(virtual_indent: int, line: str, tab_width: int = TAB_WIDTH) -> int:
+    """Track editor indent level; empty lines keep the current block indent."""
+    if line.strip():
+        return measure_indent(line, tab_width)
+    return virtual_indent
+
+
+def virtual_indent_at_line(
+    offsets: list[tuple[str, int, int]],
+    line_index: int,
+    tab_width: int = TAB_WIDTH,
+) -> int:
+    virtual_indent = 0
+    for index in range(line_index):
+        virtual_indent = update_virtual_indent(virtual_indent, offsets[index][0], tab_width)
+    return virtual_indent
 
 
 def build_line_offsets(text: str) -> list[tuple[str, int, int]]:
@@ -566,22 +575,24 @@ class AutoTyper:
 
         return index, False
 
-    def _prepare_new_line_xdotool(self, prev_line: str) -> bool:
+    def _clear_editor_indent_xdotool(self, clear_indent: int) -> bool:
+        if self.indent_mode != "editor" or clear_indent <= 0:
+            return True
+        for _ in range(clear_indent):
+            if self._reset_requested:
+                return False
+            if not self._run_xdotool("key", "BackSpace"):
+                return False
+        if self._interruptible_sleep(0.03):
+            return False
+        return True
+
+    def _prepare_new_line_xdotool(self, clear_indent: int) -> bool:
         if not self._run_xdotool("key", "Return"):
             return False
         if self._interruptible_sleep(0.12):
             return False
-        if self.indent_mode == "editor":
-            prev_indent = measure_indent(prev_line)
-            editor_indent = expected_editor_indent(prev_line, prev_indent)
-            for _ in range(editor_indent):
-                if self._reset_requested:
-                    return False
-                if not self._run_xdotool("key", "BackSpace"):
-                    return False
-            if self._interruptible_sleep(0.03):
-                return False
-        return True
+        return self._clear_editor_indent_xdotool(clear_indent)
 
     def _type_with_xdotool(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
         offsets = build_line_offsets(text)
@@ -590,6 +601,7 @@ class AutoTyper:
 
         line_index = find_line_index(offsets, start_pos)
         col_offset = start_pos - offsets[line_index][1]
+        virtual_indent = virtual_indent_at_line(offsets, line_index)
 
         for index in range(line_index, len(offsets)):
             line, line_start, line_end = offsets[index]
@@ -603,13 +615,14 @@ class AutoTyper:
                 )
                 if failed or self._reset_requested:
                     return typed_end, False
+                virtual_indent = update_virtual_indent(virtual_indent, line)
                 if self._stop_after_line:
                     return line_end, True
                 col_offset = 0
                 continue
 
             if index > line_index:
-                if not self._prepare_new_line_xdotool(offsets[index - 1][0]):
+                if not self._prepare_new_line_xdotool(virtual_indent):
                     return line_start, True
                 if self._reset_requested:
                     return line_start, False
@@ -619,9 +632,12 @@ class AutoTyper:
             typed_end, failed = self._type_string_xdotool(line, line_start, text)
             if failed or self._reset_requested:
                 return typed_end, False
+
+            virtual_indent = update_virtual_indent(virtual_indent, line)
+
             if self._stop_after_line:
                 if index < len(offsets) - 1:
-                    if not self._prepare_new_line_xdotool(line):
+                    if not self._prepare_new_line_xdotool(virtual_indent):
                         return line_end, True
                     return offsets[index + 1][1], True
                 return line_end, False
@@ -652,24 +668,28 @@ class AutoTyper:
 
         return index, False
 
-    def _prepare_new_line_pynput(self, controller, prev_line: str) -> bool:
+    def _clear_editor_indent_pynput(self, controller, clear_indent: int) -> bool:
+        from pynput.keyboard import Key
+
+        if self.indent_mode != "editor" or clear_indent <= 0:
+            return True
+        for _ in range(clear_indent):
+            if self._reset_requested:
+                return False
+            controller.press(Key.backspace)
+            controller.release(Key.backspace)
+        if self._interruptible_sleep(0.03):
+            return False
+        return True
+
+    def _prepare_new_line_pynput(self, controller, clear_indent: int) -> bool:
         from pynput.keyboard import Key
 
         controller.press(Key.enter)
         controller.release(Key.enter)
         if self._interruptible_sleep(0.12):
             return False
-        if self.indent_mode == "editor":
-            prev_indent = measure_indent(prev_line)
-            editor_indent = expected_editor_indent(prev_line, prev_indent)
-            for _ in range(editor_indent):
-                if self._reset_requested:
-                    return False
-                controller.press(Key.backspace)
-                controller.release(Key.backspace)
-            if self._interruptible_sleep(0.03):
-                return False
-        return True
+        return self._clear_editor_indent_pynput(controller, clear_indent)
 
     def _type_with_pynput(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
         from pynput.keyboard import Controller
@@ -681,6 +701,7 @@ class AutoTyper:
 
         line_index = find_line_index(offsets, start_pos)
         col_offset = start_pos - offsets[line_index][1]
+        virtual_indent = virtual_indent_at_line(offsets, line_index)
 
         for index in range(line_index, len(offsets)):
             line, line_start, line_end = offsets[index]
@@ -694,13 +715,14 @@ class AutoTyper:
                 )
                 if failed or self._reset_requested:
                     return typed_end, False
+                virtual_indent = update_virtual_indent(virtual_indent, line)
                 if self._stop_after_line:
                     return line_end, True
                 col_offset = 0
                 continue
 
             if index > line_index:
-                if not self._prepare_new_line_pynput(controller, offsets[index - 1][0]):
+                if not self._prepare_new_line_pynput(controller, virtual_indent):
                     return line_start, True
                 if self._reset_requested:
                     return line_start, False
@@ -710,9 +732,12 @@ class AutoTyper:
             typed_end, failed = self._type_string_pynput(controller, line, line_start)
             if failed or self._reset_requested:
                 return typed_end, False
+
+            virtual_indent = update_virtual_indent(virtual_indent, line)
+
             if self._stop_after_line:
                 if index < len(offsets) - 1:
-                    if not self._prepare_new_line_pynput(controller, line):
+                    if not self._prepare_new_line_pynput(controller, virtual_indent):
                         return line_end, True
                     return offsets[index + 1][1], True
                 return line_end, False
