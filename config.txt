@@ -1,0 +1,5 @@
+# Auto-Typer config — edit hotkey and speed here
+# Examples: ctrl+shift+f12, ctrl+alt+t, ctrl+shift+v
+hotkey=ctrl+shift+f12
+speed=8
+human_delay=true

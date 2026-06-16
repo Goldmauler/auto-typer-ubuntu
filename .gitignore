@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 paste.txt
+checkpoint.json
 *.log
 .DS_Store
 *~
