@@ -179,8 +179,9 @@ def parse_bool_config(value: str, default: bool = True) -> bool:
 def load_config() -> dict[str, str]:
     defaults = {
         "hotkey": "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t",
-        "speed": "8",
+        "speed": "12",
         "human_delay": "true",
+        "indent_mode": "editor" if IS_WINDOWS else "literal",
     }
     if not CONFIG_FILE.is_file():
         return defaults
@@ -196,14 +197,64 @@ def load_config() -> dict[str, str]:
     return config
 
 
-def save_config(hotkey: str, speed: float, human_delay: bool = True) -> None:
+def save_config(
+    hotkey: str,
+    speed: float,
+    human_delay: bool = True,
+    indent_mode: str = "editor",
+) -> None:
     CONFIG_FILE.write_text(
         f"# Auto-Typer config — edit hotkey and speed here\n"
         f"hotkey={hotkey}\n"
         f"speed={speed}\n"
-        f"human_delay={str(human_delay).lower()}\n",
+        f"human_delay={str(human_delay).lower()}\n"
+        f"indent_mode={indent_mode}\n",
         encoding="utf-8",
     )
+
+
+# ─── Indentation ─────────────────────────────────────────────────────────────
+
+def _line_start(text: str, pos: int) -> int:
+    return text.rfind("\n", 0, max(pos - 1, 0)) + 1
+
+
+def _line_indent_end(text: str, line_start: int) -> int:
+    pos = line_start
+    while pos < len(text) and text[pos] in " \t":
+        pos += 1
+    return pos
+
+
+def _is_in_line_indent(text: str, pos: int) -> bool:
+    if pos >= len(text):
+        return False
+    line_start = _line_start(text, pos)
+    return pos < _line_indent_end(text, line_start)
+
+
+def align_resume_position(text: str, pos: int, indent_mode: str) -> int:
+    """Skip duplicate line-indent on resume (fixes IDE auto-indent + re-type)."""
+    if indent_mode != "editor" or pos >= len(text):
+        return pos
+
+    if pos == 0 and text[pos] in " \t":
+        return _line_indent_end(text, 0)
+
+    if pos > 0 and text[pos - 1] == "\n":
+        return _line_indent_end(text, pos)
+
+    if _is_in_line_indent(text, pos):
+        return _line_indent_end(text, _line_start(text, pos))
+
+    return pos
+
+
+def skip_line_indent(text: str, pos: int, indent_mode: str) -> int:
+    """After Enter, skip leading whitespace the editor already auto-indented."""
+    if indent_mode != "editor":
+        return pos
+    return _line_indent_end(text, pos)
 
 
 # ─── Checkpoint ──────────────────────────────────────────────────────────────
@@ -283,9 +334,15 @@ def resolve_typing_job(clipboard_text: str) -> tuple[str, int, bool]:
 # ─── Typer ───────────────────────────────────────────────────────────────────
 
 class AutoTyper:
-    def __init__(self, chars_per_second: float = 8.0, human_delay: bool = True) -> None:
+    def __init__(
+        self,
+        chars_per_second: float = 12.0,
+        human_delay: bool = True,
+        indent_mode: str = "editor",
+    ) -> None:
         self.chars_per_second = chars_per_second
         self.human_delay = human_delay
+        self.indent_mode = indent_mode if indent_mode in {"editor", "literal"} else "editor"
         self._typing = False
         self._stop_requested = False
         self._use_xdotool = (not IS_WINDOWS) and shutil.which("xdotool") is not None
@@ -386,12 +443,19 @@ class AutoTyper:
         else:
             print(f"\n  ▶  Continuing {remaining} chars at {speed_label} via {backend} …")
 
+        aligned_pos = align_resume_position(text, start_pos, self.indent_mode)
+        if aligned_pos != start_pos:
+            print(
+                f"  ↪  Resume aligned {start_pos} → {aligned_pos} "
+                f"(skipped duplicate indent)"
+            )
+
         time.sleep(0.4)
 
         if self._use_xdotool:
-            end_pos = self._type_with_xdotool(text, start_pos)
+            end_pos = self._type_with_xdotool(text, aligned_pos)
         else:
-            end_pos = self._type_with_pynput(text, start_pos)
+            end_pos = self._type_with_pynput(text, aligned_pos)
 
         if self._stop_requested:
             save_checkpoint(text, end_pos)
@@ -407,7 +471,8 @@ class AutoTyper:
         self._stop_requested = False
 
     def _type_with_xdotool(self, text: str, start_pos: int = 0) -> int:
-        for index in range(start_pos, len(text)):
+        index = start_pos
+        while index < len(text):
             if self._stop_requested:
                 return index
 
@@ -419,7 +484,14 @@ class AutoTyper:
                     print("  ⚠  xdotool failed — is DISPLAY set? Try: export DISPLAY=:0")
                     self._stop_requested = True
                     return index
-            elif char == "\t":
+                index += 1
+                if self.indent_mode == "editor":
+                    time.sleep(0.06)
+                    index = skip_line_indent(text, index, self.indent_mode)
+                time.sleep(self._delay_after_char("\n", text[index] if index < len(text) else None))
+                continue
+
+            if char == "\t":
                 if not self._run_xdotool("key", "Tab"):
                     self._stop_requested = True
                     return index
@@ -428,16 +500,18 @@ class AutoTyper:
                     self._stop_requested = True
                     return index
 
+            index += 1
             time.sleep(self._delay_after_char(char, next_char))
 
-        return len(text)
+        return index
 
     def _type_with_pynput(self, text: str, start_pos: int = 0) -> int:
         from pynput.keyboard import Controller, Key
 
         controller = Controller()
+        index = start_pos
 
-        for index in range(start_pos, len(text)):
+        while index < len(text):
             if self._stop_requested:
                 return index
 
@@ -447,7 +521,14 @@ class AutoTyper:
             if char == "\n":
                 controller.press(Key.enter)
                 controller.release(Key.enter)
-            elif char == "\t":
+                index += 1
+                if self.indent_mode == "editor":
+                    time.sleep(0.06)
+                    index = skip_line_indent(text, index, self.indent_mode)
+                time.sleep(self._delay_after_char("\n", text[index] if index < len(text) else None))
+                continue
+
+            if char == "\t":
                 controller.press(Key.tab)
                 controller.release(Key.tab)
             elif char == " ":
@@ -456,9 +537,10 @@ class AutoTyper:
             else:
                 controller.type(char)
 
+            index += 1
             time.sleep(self._delay_after_char(char, next_char))
 
-        return len(text)
+        return index
 
 
 # ─── Hotkey ──────────────────────────────────────────────────────────────────
@@ -537,8 +619,15 @@ def main() -> None:
     config = load_config()
 
     parser = argparse.ArgumentParser(description="Auto-Typer (Windows + Ubuntu)")
-    parser.add_argument("--speed", type=float, default=float(config.get("speed", "8")),
-                        help="Average chars per second (default: 8)")
+    parser.add_argument("--speed", type=float, default=float(config.get("speed", "12")),
+                        help="Average chars per second (default: 12)")
+    parser.add_argument(
+        "--indent-mode",
+        type=str,
+        choices=["editor", "literal"],
+        default=config.get("indent_mode", "editor" if IS_WINDOWS else "literal"),
+        help="editor=IDE auto-indent (VS Code/Cursor), literal=type all spaces (Notepad)",
+    )
     parser.add_argument(
         "--human-delay",
         action=argparse.BooleanOptionalAction,
@@ -557,10 +646,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.save_config:
-        save_config(args.hotkey, args.speed, args.human_delay)
+        save_config(args.hotkey, args.speed, args.human_delay, args.indent_mode)
         print(
             f"  💾 Saved config: hotkey={args.hotkey}, "
-            f"speed={args.speed}, human_delay={args.human_delay}"
+            f"speed={args.speed}, human_delay={args.human_delay}, "
+            f"indent_mode={args.indent_mode}"
         )
 
     if args.test:
@@ -571,7 +661,11 @@ def main() -> None:
         os.environ["DISPLAY"] = ":0"
         print("  ℹ  DISPLAY was not set — using :0")
 
-    typer = AutoTyper(chars_per_second=args.speed, human_delay=args.human_delay)
+    typer = AutoTyper(
+        chars_per_second=args.speed,
+        human_delay=args.human_delay,
+        indent_mode=args.indent_mode,
+    )
     hotkey_str = combo_to_global_hotkey(args.hotkey)
 
     hotkeys = {hotkey_str: typer.type_clipboard}
@@ -594,6 +688,7 @@ def main() -> None:
     print(f"  ║  Hotkey    : {hotkey_display:<33s} ║")
     speed_display = typer._speed_label()
     print(f"  ║  Speed     : {speed_display:<33s} ║")
+    print(f"  ║  Indent    : {args.indent_mode:<33s} ║")
     print(f"  ║  Clipboard : {clipboard_name:<33s} ║")
     print(f"  ║  Typing    : {typing_backend:<33s} ║")
     if not IS_WINDOWS:

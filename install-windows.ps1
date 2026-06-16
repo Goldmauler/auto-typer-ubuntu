@@ -36,8 +36,9 @@ if (-not (Test-Path "config.txt")) {
         "# Auto-Typer config - edit hotkey and speed here"
         "# Examples: ctrl+shift+f12, ctrl+alt+t, ctrl+shift+v"
         "hotkey=ctrl+shift+f12"
-        "speed=8"
+        "speed=12"
         "human_delay=true"
+        "indent_mode=editor"
     ) -join "`n"
     Set-Content -Path "config.txt" -Value $configText -Encoding UTF8
     Write-Host "  Created config.txt (default hotkey: Ctrl+Shift+F12)"

@@ -1,5 +1,7 @@
-# Auto-Typer config — edit hotkey and speed here
-# Examples: ctrl+shift+f12, ctrl+alt+t, ctrl+shift+v
+# Auto-Typer config
 hotkey=ctrl+shift+f12
-speed=8
+speed=12
 human_delay=true
+# editor = VS Code/Cursor (fixes indent on resume)
+# literal = Notepad (types every space/tab)
+indent_mode=editor
