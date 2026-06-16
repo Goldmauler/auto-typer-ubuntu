@@ -179,6 +179,7 @@ def parse_bool_config(value: str, default: bool = True) -> bool:
 def load_config() -> dict[str, str]:
     defaults = {
         "hotkey": "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t",
+        "reset_hotkey": "ctrl+shift+f11" if IS_WINDOWS else "ctrl+shift+f11",
         "speed": "12",
         "human_delay": "true",
         "indent_mode": "editor" if IS_WINDOWS else "literal",
@@ -372,7 +373,8 @@ class AutoTyper:
         self.human_delay = human_delay
         self.indent_mode = indent_mode if indent_mode in {"editor", "literal"} else "editor"
         self._typing = False
-        self._stop_requested = False
+        self._stop_after_line = False
+        self._reset_requested = False
         self._use_xdotool = (not IS_WINDOWS) and shutil.which("xdotool") is not None
 
     @property
@@ -409,15 +411,15 @@ class AutoTyper:
         return max(0.03, delay)
 
     def _interruptible_sleep(self, seconds: float) -> bool:
-        """Sleep in small slices; return True if stop was requested."""
+        """Sleep in small slices; return True only if reset was requested."""
         if seconds <= 0:
-            return self._stop_requested
+            return self._reset_requested
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            if self._stop_requested:
+            if self._reset_requested:
                 return True
             time.sleep(min(0.015, end - time.monotonic()))
-        return self._stop_requested
+        return self._reset_requested
 
     def _checkpoint_stop_pos(self, text: str, index: int) -> int:
         return align_resume_position(text, index, self.indent_mode)
@@ -427,12 +429,24 @@ class AutoTyper:
             return f"~{self.chars_per_second:.0f} cps (normal)"
         return f"{self.chars_per_second:.0f} cps (steady)"
 
-    def type_clipboard(self) -> None:
+    def request_stop_after_line(self) -> None:
         if self._typing:
-            print("  ⏳ Stopping — checkpoint will be saved.")
-            self._stop_requested = True
+            print("  ⏳ Finishing current line, then stopping …")
+            self._stop_after_line = True
             return
 
+        self.type_clipboard()
+
+    def reset_typing(self) -> None:
+        clear_checkpoint()
+        self._stop_after_line = False
+        if self._typing:
+            print("  🔄 Reset — stopping now. Next F12 starts from the beginning.")
+            self._reset_requested = True
+        else:
+            print("  🔄 Reset — checkpoint cleared. F12 starts from the beginning.")
+
+    def type_clipboard(self) -> None:
         clipboard_text = get_clipboard_text()
         text, start_pos, is_resume, checkpoint_meta = resolve_typing_job(
             clipboard_text,
@@ -449,11 +463,12 @@ class AutoTyper:
                 f"  ▶  Resuming at line {ctx['line']} col {ctx['column']} "
                 f"({len(text) - start_pos} chars left)"
             )
-            print(f"  👉 Click at the END of typed text. Next: {ctx['next_chars']!r}")
+            print(f"  👉 Cursor at start of line {ctx['line']}. Next: {ctx['next_chars']!r}")
             if checkpoint_meta and checkpoint_meta.get("last_typed"):
-                print(f"  ↩  After: ...{checkpoint_meta['last_typed']!r}")
+                print(f"  ↩  Previous line ended: ...{checkpoint_meta['last_typed']!r}")
         else:
             clear_checkpoint()
+            print(f"  ▶  Starting from beginning ({len(text)} chars) …")
 
         thread = threading.Thread(
             target=self._type_text,
@@ -479,7 +494,8 @@ class AutoTyper:
 
     def _type_text(self, text: str, start_pos: int = 0) -> None:
         self._typing = True
-        self._stop_requested = False
+        self._stop_after_line = False
+        self._reset_requested = False
 
         text = normalize_text(text)
         total = len(text)
@@ -500,48 +516,63 @@ class AutoTyper:
             )
 
         if start_pos > 0:
-            print("  ⏳ Resuming in 0.6s — place cursor at end of typed text …")
-            if self._interruptible_sleep(0.6):
+            ctx = format_checkpoint_context(text, aligned_pos)
+            print(
+                f"  ⏳ Resuming in 0.5s at line {ctx['line']} — "
+                f"cursor at start of that line …"
+            )
+            if self._interruptible_sleep(0.5):
                 self._typing = False
+                self._reset_requested = False
                 return
         else:
             if self._interruptible_sleep(0.4):
                 self._typing = False
+                self._reset_requested = False
                 return
 
         if self._use_xdotool:
-            end_pos = self._type_with_xdotool(text, aligned_pos)
+            end_pos, stopped = self._type_with_xdotool(text, aligned_pos)
         else:
-            end_pos = self._type_with_pynput(text, aligned_pos)
+            end_pos, stopped = self._type_with_pynput(text, aligned_pos)
 
-        if self._stop_requested:
+        if self._reset_requested:
+            clear_checkpoint()
+            print("\n  🔄 Typing aborted. Press F12 to start from the beginning.")
+        elif stopped:
             stop_pos = self._checkpoint_stop_pos(text, end_pos)
             save_checkpoint(text, stop_pos, self.indent_mode)
             ctx = format_checkpoint_context(text, stop_pos)
-            print(f"\n  ⏹  Stopped at line {ctx['line']} col {ctx['column']} ({stop_pos}/{total})")
-            print(f"  💾 Checkpoint saved. Next will type: {ctx['next_chars']!r}")
-            print("  👉 Leave cursor where it is, then press hotkey to resume.")
+            print(
+                f"\n  ⏹  Stopped at line {ctx['line']} col {ctx['column']} "
+                f"({stop_pos}/{total})"
+            )
+            print(f"  💾 Checkpoint saved. Next line: {ctx['next_chars']!r}")
+            print("  👉 Cursor is at start of this line. Press F12 to resume.")
         else:
             clear_checkpoint()
             print(f"  ✅ Done — typed {total} characters.")
 
         self._typing = False
-        self._stop_requested = False
+        self._stop_after_line = False
+        self._reset_requested = False
 
-    def _handle_newline(self, text: str, index: int) -> int:
-        """Advance index past newline and any editor-handled indent. Returns new index."""
+    def _handle_newline(self, text: str, index: int) -> tuple[int, bool]:
+        """Advance past newline + indent. Return (index, stop_now)."""
         index += 1
         if self.indent_mode == "editor":
             if self._interruptible_sleep(0.10):
-                return self._checkpoint_stop_pos(text, index)
+                return self._checkpoint_stop_pos(text, index), True
             index = skip_line_indent(text, index, self.indent_mode)
-        return index
+        if self._stop_after_line:
+            return index, True
+        return index, False
 
-    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> int:
+    def _type_with_xdotool(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
         index = start_pos
         while index < len(text):
-            if self._stop_requested:
-                return self._checkpoint_stop_pos(text, index)
+            if self._reset_requested:
+                return index, False
 
             char = text[index]
             next_char = text[index + 1] if index + 1 < len(text) else None
@@ -549,41 +580,38 @@ class AutoTyper:
             if char == "\n":
                 if not self._run_xdotool("key", "Return"):
                     print("  ⚠  xdotool failed — is DISPLAY set? Try: export DISPLAY=:0")
-                    self._stop_requested = True
-                    return self._checkpoint_stop_pos(text, index)
-                index = self._handle_newline(text, index)
-                if self._stop_requested:
-                    return index
+                    return self._checkpoint_stop_pos(text, index), True
+                index, stop_now = self._handle_newline(text, index)
+                if stop_now or self._reset_requested:
+                    return index, stop_now and not self._reset_requested
                 if self._interruptible_sleep(
                     self._delay_after_char("\n", text[index] if index < len(text) else None)
                 ):
-                    return self._checkpoint_stop_pos(text, index)
+                    return self._checkpoint_stop_pos(text, index), False
                 continue
 
             if char == "\t":
                 if not self._run_xdotool("key", "Tab"):
-                    self._stop_requested = True
-                    return self._checkpoint_stop_pos(text, index)
+                    return self._checkpoint_stop_pos(text, index), True
             else:
                 if not self._run_xdotool("type", "--delay", "0", "--", char):
-                    self._stop_requested = True
-                    return self._checkpoint_stop_pos(text, index)
+                    return self._checkpoint_stop_pos(text, index), True
 
             index += 1
             if self._interruptible_sleep(self._delay_after_char(char, next_char)):
-                return self._checkpoint_stop_pos(text, index)
+                return index, False
 
-        return index
+        return index, False
 
-    def _type_with_pynput(self, text: str, start_pos: int = 0) -> int:
+    def _type_with_pynput(self, text: str, start_pos: int = 0) -> tuple[int, bool]:
         from pynput.keyboard import Controller, Key
 
         controller = Controller()
         index = start_pos
 
         while index < len(text):
-            if self._stop_requested:
-                return self._checkpoint_stop_pos(text, index)
+            if self._reset_requested:
+                return index, False
 
             char = text[index]
             next_char = text[index + 1] if index + 1 < len(text) else None
@@ -591,13 +619,13 @@ class AutoTyper:
             if char == "\n":
                 controller.press(Key.enter)
                 controller.release(Key.enter)
-                index = self._handle_newline(text, index)
-                if self._stop_requested:
-                    return index
+                index, stop_now = self._handle_newline(text, index)
+                if stop_now or self._reset_requested:
+                    return index, stop_now and not self._reset_requested
                 if self._interruptible_sleep(
                     self._delay_after_char("\n", text[index] if index < len(text) else None)
                 ):
-                    return self._checkpoint_stop_pos(text, index)
+                    return self._checkpoint_stop_pos(text, index), False
                 continue
 
             if char == "\t":
@@ -611,9 +639,9 @@ class AutoTyper:
 
             index += 1
             if self._interruptible_sleep(self._delay_after_char(char, next_char)):
-                return self._checkpoint_stop_pos(text, index)
+                return index, False
 
-        return index
+        return index, False
 
 
 # ─── Hotkey ──────────────────────────────────────────────────────────────────
@@ -711,7 +739,13 @@ def main() -> None:
         "--hotkey",
         type=str,
         default=config.get("hotkey", "ctrl+shift+f12" if IS_WINDOWS else "ctrl+alt+t"),
-        help='Hotkey combo (default: "ctrl+shift+f12" on Windows)',
+        help='Start / resume / stop-after-line (default: "ctrl+shift+f12")',
+    )
+    parser.add_argument(
+        "--reset-hotkey",
+        type=str,
+        default=config.get("reset_hotkey", "ctrl+shift+f11"),
+        help='Reset to beginning (default: "ctrl+shift+f11")',
     )
     parser.add_argument("--test", action="store_true", help="Run diagnostic self-test")
     parser.add_argument("--save-config", action="store_true",
@@ -740,10 +774,15 @@ def main() -> None:
         indent_mode=args.indent_mode,
     )
     hotkey_str = combo_to_global_hotkey(args.hotkey)
+    reset_hotkey_str = combo_to_global_hotkey(args.reset_hotkey)
 
-    hotkeys = {hotkey_str: typer.type_clipboard}
+    hotkeys = {
+        hotkey_str: typer.request_stop_after_line,
+        reset_hotkey_str: typer.reset_typing,
+    }
 
     hotkey_display = args.hotkey.upper().replace("+", " + ")
+    reset_display = args.reset_hotkey.upper().replace("+", " + ")
     platform_name = "Windows" if IS_WINDOWS else "Ubuntu"
 
     if IS_WINDOWS:
@@ -758,26 +797,27 @@ def main() -> None:
     print("  ╔══════════════════════════════════════════════╗")
     print(f"  ║          🚀  AUTO-TYPER  ({platform_name:<10s})       ║")
     print("  ╠══════════════════════════════════════════════╣")
-    print(f"  ║  Hotkey    : {hotkey_display:<33s} ║")
+    print(f"  ║  Start/Stop : {hotkey_display:<33s} ║")
+    print(f"  ║  Reset      : {reset_display:<33s} ║")
     speed_display = typer._speed_label()
-    print(f"  ║  Speed     : {speed_display:<33s} ║")
-    print(f"  ║  Indent    : {args.indent_mode:<33s} ║")
-    print(f"  ║  Clipboard : {clipboard_name:<33s} ║")
-    print(f"  ║  Typing    : {typing_backend:<33s} ║")
+    print(f"  ║  Speed      : {speed_display:<33s} ║")
+    print(f"  ║  Indent     : {args.indent_mode:<33s} ║")
+    print(f"  ║  Clipboard  : {clipboard_name:<33s} ║")
+    print(f"  ║  Typing     : {typing_backend:<33s} ║")
     if not IS_WINDOWS:
-        print(f"  ║  DISPLAY   : {os.environ.get('DISPLAY', ''):<33s} ║")
+        print(f"  ║  DISPLAY    : {os.environ.get('DISPLAY', ''):<33s} ║")
     print("  ║                                              ║")
     print("  ║  1. Copy text with Ctrl+C                    ║")
     print("  ║  2. Click where you want to type             ║")
-    print(f"  ║  3. Press {hotkey_display:<34s} ║")
-    print("  ║  4. Press hotkey again to STOP + save spot    ║")
-    print("  ║  5. Press hotkey again to RESUME typing      ║")
-    print("  ║     (copy new text to start fresh)           ║")
+    print(f"  ║  3. {hotkey_display} = start / resume          ║")
+    print(f"  ║  4. {hotkey_display} while typing = stop       ║")
+    print("  ║     after current line finishes              ║")
+    print(f"  ║  5. {reset_display} = reset to beginning      ║")
     print("  ║                                              ║")
     print("  ║  Ctrl+C here to quit                         ║")
     print("  ╚══════════════════════════════════════════════╝")
     print()
-    print(f"  Listening for {hotkey_str} …")
+    print(f"  Listening for {hotkey_str} and {reset_hotkey_str} …")
     print()
 
     try:

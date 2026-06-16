@@ -1,5 +1,6 @@
 # Auto-Typer config
 hotkey=ctrl+shift+f12
+reset_hotkey=ctrl+shift+f11
 speed=12
 human_delay=true
 # editor = VS Code/Cursor (fixes indent on resume)
