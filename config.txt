@@ -1,10 +1,12 @@
 # Auto-Typer config
 hotkey=ctrl+shift+f12
 reset_hotkey=ctrl+shift+f11
-speed=40
+speed=30
 human_delay=false
 
-# INDENT MODE - pick ONE:
-# literal  = Notepad, WordPad, basic text editors (types every space/tab exactly)
-# editor   = VS Code, Cursor ONLY (clears IDE auto-indent)
+# paste_lines = pastes each line exactly (BEST for text editors)
+# keys        = types char-by-char (old method)
+type_method=paste_lines
+
+# Only used when type_method=keys
 indent_mode=literal

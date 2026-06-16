@@ -53,8 +53,9 @@ if (-not (Test-Path "config.txt")) {
         "# Auto-Typer config"
         "hotkey=ctrl+shift+f12"
         "reset_hotkey=ctrl+shift+f11"
-        "speed=40"
+        "speed=30"
         "human_delay=false"
+        "type_method=paste_lines"
         "indent_mode=literal"
     ) -join "`n"
     Set-Content -Path "config.txt" -Value $configText -Encoding UTF8
